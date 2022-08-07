@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion : '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: State Machine and Lambda function for google health check
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LogPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:log-group:/aws/lambda/*:*:*"
+
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: Lambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - lambda:InvokeAsync
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:*:*"
+        - PolicyName: Cloudwatch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource: "*"
+        - PolicyName: StepFunction
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource:
+                  - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:*"
+
+  GoogleHealthCheck:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: GoogleHealthCheck
+      InlineCode: |
+          import urllib3
+
+
+          http = urllib3.PoolManager()
+
+          def handler(event, context):
+              resp = http.request('GET', 'https://google.com')
+              if resp.status != 200:
+                  print('Huston, we have a problem')
+              else:
+                  print('All quiet on the western front')
+      Runtime: python3.9
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 60
+      Role: !Sub ${LambdaRole.Arn}
+
+  GoogleHealthCheckStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: GoogleHealthCheck
+      DefinitionString: !Sub |-
+        {
+          "Comment": "State Machine to periodically check google.com health",
+          "StartAt": "Invoke Health Check",
+          "States": {
+            "Invoke Health Check": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "Payload.$": "$",
+                "FunctionName": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:GoogleHealthCheck:$LATEST"
+              },
+              "End": true
+            }
+          }
+        }
+      RoleArn: !GetAtt StateMachineRole.Arn
